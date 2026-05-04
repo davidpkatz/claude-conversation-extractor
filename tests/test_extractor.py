@@ -7,10 +7,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from extract_claude_logs import ClaudeConversationExtractor  # noqa: E402
+from extract_claude_logs import ClaudeConversationExtractor, encode_project_path  # noqa: E402
 
 
 class TestClaudeConversationExtractor(unittest.TestCase):
@@ -147,6 +149,182 @@ class TestClaudeConversationExtractor(unittest.TestCase):
         self.assertEqual(sessions[0].stat().st_mtime, 2000)
         self.assertEqual(sessions[1].stat().st_mtime, 1500)
         self.assertEqual(sessions[2].stat().st_mtime, 1000)
+
+
+class TestEncodeProjectPath:
+    """Test suite for encode_project_path helper function."""
+
+    def test_absolute_path(self):
+        """Test encoding an absolute path."""
+        assert encode_project_path("/Users/me/foo") == "-Users-me-foo"
+
+    def test_path_with_dotted_segment(self):
+        """Test that both / and . are replaced with -."""
+        assert encode_project_path("/foo/.bar") == "-foo--bar"
+
+    def test_trailing_slash_normalised(self):
+        """Test that trailing slashes are normalised away."""
+        assert encode_project_path("/Users/me/foo/") == "-Users-me-foo"
+
+    def test_relative_dot_resolves_to_cwd(self, tmp_path, monkeypatch):
+        """Test that . resolves to the current working directory."""
+        monkeypatch.chdir(tmp_path)
+        expected = str(tmp_path.resolve()).replace("/", "-").replace(".", "-")
+        assert encode_project_path(".") == expected
+
+    def test_double_dot_resolves(self, tmp_path, monkeypatch):
+        """Test that .. resolves to parent directory."""
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        monkeypatch.chdir(sub)
+        expected = str(tmp_path.resolve()).replace("/", "-").replace(".", "-")
+        assert encode_project_path("..") == expected
+
+    def test_tilde_expanded(self, monkeypatch, tmp_path):
+        """Test that ~ is expanded to home directory."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        expected = str(tmp_path.resolve()).replace("/", "-").replace(".", "-") + "-foo"
+        assert encode_project_path("~/foo") == expected
+
+
+class TestProjectFlag:
+    def _make_fake_claude_dir(
+        self, tmp_path, project_name, n_sessions=2, prefix="session"
+    ):
+        """Build ~/.claude/projects/<project_name>/<prefix>-<i>.jsonl tree.
+
+        Each session file contains a minimal user+assistant exchange so
+        --extract / --recent / --all produce real markdown output.
+        """
+        projects = tmp_path / ".claude" / "projects" / project_name
+        projects.mkdir(parents=True)
+        user_msg = json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "hi"},
+        })
+        assistant_msg = json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}],
+            },
+        })
+        for i in range(n_sessions):
+            (projects / f"{prefix}-{i}.jsonl").write_text(
+                user_msg + "\n" + assistant_msg + "\n"
+            )
+        return projects
+
+    def test_project_flag_filters_list(self, tmp_path, monkeypatch, capsys):
+        target = tmp_path / "myrepo"
+        target.mkdir()
+        # Distinct filename prefixes per project so the assertion can prove
+        # the filter excluded the other project rather than just counting hits.
+        self._make_fake_claude_dir(
+            tmp_path, encode_project_path(str(target)),
+            n_sessions=3, prefix="target",
+        )
+        self._make_fake_claude_dir(
+            tmp_path, "-other-project", n_sessions=2, prefix="other",
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["claude-extract", "--list", "--project", str(target)]
+        )
+
+        from extract_claude_logs import main
+        main()
+        out = capsys.readouterr().out
+        assert out.count("target-") == 3
+        assert "other-" not in out
+
+    def test_project_flag_missing_dir_exits_nonzero(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        (tmp_path / ".claude" / "projects").mkdir(parents=True)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["claude-extract", "--list", "--project", "/no/such/path"]
+        )
+        from extract_claude_logs import main
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "No Claude Code logs found" in err
+        assert "/no/such/path" in err
+
+    def test_project_flag_with_recent(self, tmp_path, monkeypatch):
+        target = tmp_path / "myrepo"
+        target.mkdir()
+        self._make_fake_claude_dir(
+            tmp_path, encode_project_path(str(target)),
+            n_sessions=3, prefix="target",
+        )
+        self._make_fake_claude_dir(
+            tmp_path, "-other-project", n_sessions=5, prefix="other",
+        )
+
+        output_dir = tmp_path / "out"
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", [
+            "claude-extract", "--recent", "1",
+            "--project", str(target),
+            "--output", str(output_dir),
+        ])
+        from extract_claude_logs import main
+        main()
+        written = list(output_dir.glob("*.md"))
+        assert len(written) == 1
+
+    def test_project_flag_with_all(self, tmp_path, monkeypatch):
+        target = tmp_path / "myrepo"
+        target.mkdir()
+        self._make_fake_claude_dir(
+            tmp_path, encode_project_path(str(target)),
+            n_sessions=3, prefix="target",
+        )
+        self._make_fake_claude_dir(
+            tmp_path, "-other-project", n_sessions=5, prefix="other",
+        )
+
+        output_dir = tmp_path / "out"
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", [
+            "claude-extract", "--all",
+            "--project", str(target),
+            "--output", str(output_dir),
+        ])
+        from extract_claude_logs import main
+        main()
+        written = list(output_dir.glob("*.md"))
+        assert len(written) == 3
+
+    def test_project_flag_with_extract_index(self, tmp_path, monkeypatch):
+        target = tmp_path / "myrepo"
+        target.mkdir()
+        self._make_fake_claude_dir(
+            tmp_path, encode_project_path(str(target)),
+            n_sessions=2, prefix="target",
+        )
+        self._make_fake_claude_dir(
+            tmp_path, "-other-project", n_sessions=3, prefix="other",
+        )
+
+        output_dir = tmp_path / "out"
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", [
+            "claude-extract", "--extract", "1",
+            "--project", str(target),
+            "--output", str(output_dir),
+        ])
+        from extract_claude_logs import main
+        main()
+        written = list(output_dir.glob("*.md"))
+        assert len(written) == 1
 
 
 if __name__ == "__main__":
