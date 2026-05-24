@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `claude-conversation-extractor` is a published PyPI tool (`pip install claude-conversation-extractor`, currently v1.1.2) that reads Claude Code's local JSONL conversation files from `~/.claude/projects/` and exports them as Markdown, JSON, or HTML. It is intentionally **stdlib-only** for runtime; `spacy` is the only optional dependency (semantic search).
 
-**Naming clash to watch for:** the source repo lives at `~/Code/claude-projects/claude-conversation-extractor/`, but the directory the tool *reads* is `~/.claude/projects/` (Claude Code's actual storage). Don't conflate them when writing tests or examples — never point output at `~/.claude/projects/`.
+**Naming clash to watch for:** the source repo lives at `~/Code/claude-projects/TruFit-junk/claude-conversation-extractor/`, but the directory the tool *reads* is `~/.claude/projects/` (Claude Code's actual storage). Don't conflate them when writing tests or examples — never point output at `~/.claude/projects/`.
+
+If this repo gets moved again, the pipx editable install will silently break — its `.pth` file points at an absolute path. Fix is `pipx uninstall claude-conversation-extractor && pipx install -e <new-path>`.
 
 ## Common commands
 
